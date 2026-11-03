@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "INAAC Staff Demo",
+    "slug": "inaac-staff-demo",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "web": {
+      "bundler": "metro"
+    },
+    "android": {
+      "package": "in.inaac.staffdemo",
+      "permissions": ["CAMERA"]
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow INAAC Staff Demo to scan participant QR codes."
+        }
+      ]
+    ]
+  }
+}
