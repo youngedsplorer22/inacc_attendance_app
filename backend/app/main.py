@@ -1,16 +1,45 @@
+# import os
+# from pathlib import Path
+# import psycopg
+# from psycopg.rows import dict_row
+# from dotenv import load_dotenv
+# import cloudinary
+# import cloudinary.uploader
+# from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+# from fastapi.middleware.cors import CORSMiddleware
+# from pydantic import BaseModel, Field
 import os
+import json
+import time
+import hmac
+import hashlib
+import base64
 from pathlib import Path
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 import cloudinary
 import cloudinary.uploader
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    UploadFile,
+    File,
+    Depends,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 APP_DIR = Path(__file__).resolve().parent
 load_dotenv(APP_DIR.parent / ".env", override=True)
 DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+ADMIN_TOKEN_SECRET = os.getenv("ADMIN_TOKEN_SECRET")
+admin_security = HTTPBearer(auto_error=False)
 app = FastAPI(
     title="INAAC Attendance API",
     description="Participant lookup and four-day attendance management.",
@@ -27,6 +56,12 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:8081",
         "http://127.0.0.1:8081",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ] + [
+        origin.strip()
+        for origin in os.getenv("ADMIN_CORS_ORIGINS", "").split(",")
+        if origin.strip()
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -480,3 +515,235 @@ async def upload_participant_photo(
         )
     finally:
         await file.close()
+# ==================================================
+# ADMIN AUTHENTICATION AND DASHBOARD
+# ==================================================
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+ADMIN_TOKEN_TTL_SECONDS = 8 * 60 * 60
+def create_admin_token(username: str) -> str:
+    if not ADMIN_TOKEN_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin authentication is not configured."
+        )
+    payload = {
+        "username": username,
+        "exp": int(time.time()) + ADMIN_TOKEN_TTL_SECONDS
+    }
+    payload_bytes = json.dumps(
+        payload,
+        separators=(",", ":")
+    ).encode("utf-8")
+    encoded_payload = base64.urlsafe_b64encode(
+        payload_bytes
+    ).decode("utf-8").rstrip("=")
+    signature = hmac.new(
+        ADMIN_TOKEN_SECRET.encode("utf-8"),
+        encoded_payload.encode("utf-8"),
+        hashlib.sha256
+    ).digest()
+    encoded_signature = base64.urlsafe_b64encode(
+        signature
+    ).decode("utf-8").rstrip("=")
+    return f"{encoded_payload}.{encoded_signature}"
+def require_admin(
+    credentials: HTTPAuthorizationCredentials | None = Depends(admin_security)
+):
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD or not ADMIN_TOKEN_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin authentication is not configured."
+        )
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Admin authentication required."
+        )
+    token = credentials.credentials
+    try:
+        encoded_payload, encoded_signature = token.split(".")
+        expected_signature = hmac.new(
+            ADMIN_TOKEN_SECRET.encode("utf-8"),
+            encoded_payload.encode("utf-8"),
+            hashlib.sha256
+        ).digest()
+        supplied_signature = base64.urlsafe_b64decode(
+            encoded_signature + "=" * (-len(encoded_signature) % 4)
+        )
+        if not hmac.compare_digest(
+            expected_signature,
+            supplied_signature
+        ):
+            raise ValueError("Invalid signature")
+        payload_bytes = base64.urlsafe_b64decode(
+            encoded_payload + "=" * (-len(encoded_payload) % 4)
+        )
+        payload = json.loads(payload_bytes.decode("utf-8"))
+        if payload.get("username") != ADMIN_USERNAME:
+            raise ValueError("Invalid username")
+        if int(payload.get("exp", 0)) < int(time.time()):
+            raise ValueError("Token expired")
+        return payload["username"]
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired admin session."
+        )
+# --------------------------------------------------
+# ADMIN LOGIN
+# --------------------------------------------------
+@app.post("/api/admin/login")
+def admin_login(request: AdminLoginRequest):
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD or not ADMIN_TOKEN_SECRET:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin authentication is not configured."
+        )
+    username_valid = hmac.compare_digest(
+        request.username,
+        ADMIN_USERNAME
+    )
+    password_valid = hmac.compare_digest(
+        request.password,
+        ADMIN_PASSWORD
+    )
+    if not username_valid or not password_valid:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin username or password."
+        )
+    token = create_admin_token(ADMIN_USERNAME)
+    return {
+        "success": True,
+        "message": "Admin login successful.",
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": ADMIN_TOKEN_TTL_SECONDS
+    }
+# --------------------------------------------------
+# VERIFY ADMIN SESSION
+# --------------------------------------------------
+@app.get("/api/admin/me")
+def admin_me(admin: str = Depends(require_admin)):
+    return {
+        "success": True,
+        "username": admin
+    }
+# --------------------------------------------------
+# ADMIN LOGOUT
+# --------------------------------------------------
+@app.post("/api/admin/logout")
+def admin_logout(admin: str = Depends(require_admin)):
+    # The frontend should discard its stored access token.
+    # This token will also expire automatically after 8 hours.
+    return {
+        "success": True,
+        "message": "Logged out successfully."
+    }
+# --------------------------------------------------
+# ADMIN DASHBOARD SUMMARY
+# --------------------------------------------------
+@app.get("/api/admin/dashboard")
+def admin_dashboard(
+    selected_date: date | None = Query(default=None, alias="date"),
+    admin: str = Depends(require_admin)
+):
+    if selected_date is None:
+        selected_date = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        ).date()
+    with get_connection() as conn:
+        summary = conn.execute(
+            """
+            WITH daily_attendance AS (
+                SELECT
+                    participant_id,
+                    MIN(in_time) AS in_time,
+                    MAX(out_time) AS out_time
+                FROM attendance_records
+                WHERE (in_time AT TIME ZONE 'Asia/Kolkata')::date = %s
+                GROUP BY participant_id
+            )
+            SELECT
+                COUNT(p.id) AS total_employees,
+                COUNT(d.participant_id) AS present_today,
+                COUNT(p.id) FILTER (
+                    WHERE p.in_premise = TRUE
+                ) AS currently_inside,
+                COUNT(p.id) FILTER (
+                    WHERE d.participant_id IS NULL
+                ) AS absent_today
+            FROM participants p
+            LEFT JOIN daily_attendance d
+                ON d.participant_id = p.id
+            """,
+            (selected_date,)
+        ).fetchone()
+    return {
+        "success": True,
+        "date": selected_date.isoformat(),
+        "summary": summary
+    }
+# --------------------------------------------------
+# ADMIN EMPLOYEE ATTENDANCE TABLE
+# --------------------------------------------------
+@app.get("/api/admin/employees")
+def admin_employees(
+    selected_date: date | None = Query(default=None, alias="date"),
+    admin: str = Depends(require_admin)
+):
+    if selected_date is None:
+        selected_date = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        ).date()
+    with get_connection() as conn:
+        employees = conn.execute(
+            """
+            WITH daily_attendance AS (
+                SELECT
+                    participant_id,
+                    MIN(in_time) AS in_time,
+                    MAX(out_time) AS out_time
+                FROM attendance_records
+                WHERE (in_time AT TIME ZONE 'Asia/Kolkata')::date = %s
+                GROUP BY participant_id
+            )
+            SELECT
+                p.id,
+                p.roll_no,
+                p.child_name,
+                p.phone_no,
+                p.email,
+                p.school_name,
+                p.city,
+                p.state,
+                p.region,
+                p.grade,
+                p.team_no,
+                p.group_no,
+                p.image_url,
+                p.in_premise,
+                d.in_time,
+                d.out_time,
+                CASE
+                    WHEN d.participant_id IS NULL
+                        THEN 'absent'
+                    WHEN d.out_time IS NULL
+                        THEN 'present'
+                    ELSE 'dispersed'
+                END AS attendance_status
+            FROM participants p
+            LEFT JOIN daily_attendance d
+                ON d.participant_id = p.id
+            ORDER BY p.roll_no ASC
+            """,
+            (selected_date,)
+        ).fetchall()
+    return {
+        "success": True,
+        "date": selected_date.isoformat(),
+        "total": len(employees),
+        "employees": employees
+    }

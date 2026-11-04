@@ -184,4 +184,10 @@ __pycache__/
 /packages/react-native/**/api/xml
 /packages/react-native/**/api/codegen
 /packages/react-native/**/.doxygen.config.*.generated
-/scripts/cxx-api/codegen
+/scripts/cxx-api/codegen.expo/
+
+# Expo local development files
+.expo/
+
+# Expo build output
+/dist/

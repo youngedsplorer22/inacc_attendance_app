@@ -10,7 +10,11 @@
     },
     "android": {
       "package": "in.inaac.staffdemo",
-      "permissions": ["CAMERA"]
+      "permissions": [
+        "CAMERA",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       [
@@ -19,6 +23,12 @@
           "cameraPermission": "Allow INAAC Staff Demo to scan participant QR codes."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "c50774bb-704f-4930-8dff-56980c4be22e"
+      }
+    },
+    "owner": "aniket1920"
   }
 }

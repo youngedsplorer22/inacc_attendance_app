@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import * as FileSystem from "expo-file-system/legacy";
 import {
   ActivityIndicator,
   Alert,
@@ -16,9 +17,8 @@ import {
   Modal,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import * as ImagePicker from "expo-image-picker";
 // IMPORTANT: Replace with your computer's Wi-Fi IPv4 address.
-const API_BASE_URL = "http://192.168.1.18:8010";
+const API_BASE_URL = "https://inaccattendanceapp-production.up.railway.app";
 const ALLOWED_QR_HOSTS = [
   "group1.inacc.in",
   "www.group1.inacc.in",
@@ -73,7 +73,10 @@ export default function App() {
   const [actionMessage, setActionMessage] = useState("");
   const [photoUploading, setPhotoUploading] = useState(false);
   const [showPhotoPreview, setShowPhotoPreview] = useState(false);
+  const [photoCameraOpen, setPhotoCameraOpen] = useState(false);
+  const [capturedPhotoUri, setCapturedPhotoUri] = useState(null);
   const [photoMessage, setPhotoMessage] = useState("");
+  const photoCameraRef = useRef(null);
   useEffect(() => {
     if (screen === "scanner") {
       setLastScanned("");
@@ -237,86 +240,148 @@ export default function App() {
         }
       );
       const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(
-          data.detail ||
-          data.message ||
-          `Dispersal failed (${response.status})`
+        if (!response.ok) {
+          throw new Error(
+            data.detail ||
+            data.message ||
+            `Dispersal failed (${response.status})`
+          );
+        }
+        if (data.success === false) {
+          throw new Error(
+            data.message || "Dispersal could not be recorded."
+          );
+        }
+        setDispersalStatus("dispersed");
+        setActionMessage(
+          `${participant.child_name} has been successfully marked as DISPERSED.`
         );
-      }
-      if (data.success === false) {
-        throw new Error(
-          data.message || "Dispersal could not be recorded."
+      } catch (error) {
+        setActionMessage(
+          `Dispersal failed: ${error.message}`
         );
+      } finally {
+        setAttendanceLoading(false);
       }
-      setDispersalStatus("dispersed");
-      setActionMessage(
-        `${participant.child_name} has been successfully marked as DISPERSED.`
-      );
-    } catch (error) {
-      setActionMessage(
-        `Dispersal failed: ${error.message}`
-      );
-    } finally {
-      setAttendanceLoading(false);
     }
-  }
-  async function editParticipantPhoto() {
+  async function openParticipantPhotoCamera() {
     if (!participant?.roll_no || photoUploading) return;
     setPhotoMessage("");
-    try {
-      const permission =
-        await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!permission.granted) {
+    setCapturedPhotoUri(null);
+    if (!permission?.granted) {
+      const result = await requestPermission();
+      if (!result.granted) {
         setPhotoMessage(
-          "Please allow photo library access in your device settings."
+          "Please allow camera access to capture the participant photo."
         );
         return;
       }
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ["images"],
-        allowsEditing: true,
-        aspect: [1, 1],
+    }
+    setPhotoCameraOpen(true);
+  }
+  async function captureParticipantPhoto() {
+    if (!photoCameraRef.current || photoUploading) return;
+    try {
+      const photo = await photoCameraRef.current.takePictureAsync({
         quality: 0.75,
+        skipProcessing: false,
       });
-      if (result.canceled || !result.assets?.length) return;
-      const asset = result.assets[0];
-      const formData = new FormData();
-      if (Platform.OS === "web" && asset.file) {
-        formData.append("file", asset.file);
-      } else {
-        formData.append("file", {
-          uri: asset.uri,
-          name: `participant_${participant.roll_no}.jpg`,
-          type: asset.mimeType || "image/jpeg",
-        });
+      if (!photo?.uri) {
+        throw new Error("Camera did not return a photo.");
       }
-      setPhotoUploading(true);
-      const response = await fetch(
+      setCapturedPhotoUri(photo.uri);
+      setPhotoCameraOpen(false);
+      setPhotoMessage("");
+    } catch (error) {
+      setPhotoMessage(`Could not capture photo: ${error.message}`);
+    }
+  }
+  async function saveParticipantPhoto() {
+    if (!participant?.roll_no || !capturedPhotoUri || photoUploading) {
+      return;
+    }
+    setPhotoUploading(true);
+    setPhotoMessage("");
+    try {
+      const uploadUrl =
         `${API_BASE_URL}/api/v1/participants/${encodeURIComponent(
           participant.roll_no
-        )}/photo`,
-        {
-          method: "POST",
-          body: formData,
+        )}/photo`;
+      let data = {};
+      let status = 0;
+      if (Platform.OS === "web") {
+        // Browser upload
+        const imageResponse = await fetch(capturedPhotoUri);
+        if (!imageResponse.ok) {
+          throw new Error("Unable to read captured photo.");
         }
-      );
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.success) {
-        throw new Error(
-          data.detail || data.message || "Photo upload failed."
+        const blob = await imageResponse.blob();
+        const formData = new globalThis.FormData();
+        formData.append(
+          "file",
+          blob,
+          `participant_${participant.roll_no}.jpg`
         );
+        const result = await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", uploadUrl);
+          xhr.onload = () => {
+            let responseData = {};
+            try {
+              responseData = JSON.parse(xhr.responseText);
+            } catch {
+              responseData = {};
+            }
+            resolve({
+              status: xhr.status,
+              data: responseData,
+            });
+          };
+          xhr.onerror = () => reject(new Error("Network upload failed."));
+          xhr.send(formData);
+        });
+        status = result.status;
+        data = result.data;
+      } else {
+        // Native Android / iOS upload using Expo FileSystem
+        const result = await FileSystem.uploadAsync(
+          uploadUrl,
+          capturedPhotoUri,
+          {
+            httpMethod: "POST",
+            uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+            fieldName: "file",
+            mimeType: "image/jpeg",
+          }
+        );
+        status = result.status;
+        try {
+          data = JSON.parse(result.body);
+        } catch {
+          data = {};
+        }
+      }
+      if (status < 200 || status >= 300 || !data.success) {
+        const detail =
+          typeof data.detail === "string"
+            ? data.detail
+            : typeof data.message === "string"
+            ? data.message
+            : JSON.stringify(data.detail || data);
+        throw new Error(detail || `Upload failed (${status}).`);
       }
       setParticipant((previous) => ({
         ...previous,
         image_url: data.image_url,
         cloudinary_public_id: data.cloudinary_public_id,
       }));
-      setPhotoMessage(
-        "Photo saved successfully across all event days."
-      );
+      setCapturedPhotoUri(null);
+      setPhotoMessage("Photo saved successfully.");
     } catch (error) {
-      setPhotoMessage(`Photo upload failed: ${error.message}`);
+      console.error("Photo upload error:", error);
+      setPhotoMessage(
+        `Photo upload failed: ${error.message || String(error)}`
+      );
     } finally {
       setPhotoUploading(false);
     }
@@ -490,6 +555,8 @@ export default function App() {
                     activeOpacity={0.85}
                     onPress={() => {
                       setPhotoMessage("");
+                      setCapturedPhotoUri(null);
+                      setPhotoCameraOpen(false);
                       setShowPhotoPreview(true);
                     }}
                   >
@@ -511,6 +578,8 @@ export default function App() {
                     style={styles.editPhotoButton}
                     onPress={() => {
                       setPhotoMessage("");
+                      setCapturedPhotoUri(null);
+                      setPhotoCameraOpen(false);
                       setShowPhotoPreview(true);
                     }}
                     disabled={photoUploading}
@@ -618,61 +687,139 @@ export default function App() {
         transparent
         animationType="fade"
         onRequestClose={() => {
-          if (!photoUploading) setShowPhotoPreview(false);
+          if (!photoUploading) {
+            setShowPhotoPreview(false);
+            setPhotoCameraOpen(false);
+            setCapturedPhotoUri(null);
+          }
         }}
       >
         <View style={styles.photoModalOverlay}>
           <View style={styles.photoModalCard}>
             <TouchableOpacity
               style={styles.photoModalClose}
-              onPress={() => setShowPhotoPreview(false)}
+              onPress={() => {
+                setShowPhotoPreview(false);
+                setPhotoCameraOpen(false);
+                setCapturedPhotoUri(null);
+              }}
               disabled={photoUploading}
             >
               <Text style={styles.photoModalCloseText}>×</Text>
             </TouchableOpacity>
             <Text style={styles.photoModalTitle}>
-              Participant Photograph
+              {photoCameraOpen
+                ? "Capture Student Photo"
+                : capturedPhotoUri
+                ? "Review Student Photo"
+                : "Participant Photograph"}
             </Text>
             <Text style={styles.photoModalSubtitle}>
               {participant?.child_name} · Roll No. {participant?.roll_no}
             </Text>
-            {participant?.image_url ? (
-              <Image
-                source={{ uri: participant.image_url }}
-                style={styles.photoPreviewImage}
-                resizeMode="contain"
-              />
+            {photoCameraOpen ? (
+              <>
+                <View style={styles.photoCameraWrap}>
+                  <CameraView
+                    ref={photoCameraRef}
+                    style={StyleSheet.absoluteFill}
+                    facing="back"
+                    mode="picture"
+                  />
+                </View>
+                <Text style={styles.photoModalHint}>
+                  Position the student in the frame and tap Capture.
+                </Text>
+                <TouchableOpacity
+                  style={styles.photoActionButton}
+                  onPress={captureParticipantPhoto}
+                >
+                  <Text style={styles.photoActionButtonText}>
+                    CAPTURE PHOTO
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : capturedPhotoUri ? (
+              <>
+                <Image
+                  source={{ uri: capturedPhotoUri }}
+                  style={styles.photoPreviewImage}
+                  resizeMode="cover"
+                />
+                <View style={styles.photoButtonRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.photoActionButton,
+                      styles.photoSecondaryButton,
+                      styles.photoActionHalf
+                    ]}
+                    onPress={openParticipantPhotoCamera}
+                    disabled={photoUploading}
+                  >
+                    <Text style={styles.photoActionButtonText}>
+                      RETAKE
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.photoActionButton, styles.photoActionHalf]}
+                    onPress={saveParticipantPhoto}
+                    disabled={photoUploading}
+                  >
+                    {photoUploading ? (
+                      <ActivityIndicator color="#FFFFFF" />
+                    ) : (
+                      <Text style={styles.photoActionButtonText}>
+                        SAVE PHOTO
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </>
             ) : (
-              <View style={styles.photoPreviewPlaceholder}>
-                <Text style={styles.photoPreviewInitial}>
-                  {participant?.child_name?.charAt(0) || "?"}
+              <>
+                {participant?.image_url ? (
+                  <Image
+                    source={{ uri: participant.image_url }}
+                    style={styles.photoPreviewImage}
+                    resizeMode="contain"
+                  />
+                ) : (
+                  <View style={styles.photoPreviewPlaceholder}>
+                    <Text style={styles.photoPreviewInitial}>
+                      {participant?.child_name?.charAt(0) || "?"}
+                    </Text>
+                    <Text style={styles.photoPreviewPlaceholderText}>
+                      No photograph added yet
+                    </Text>
+                  </View>
+                )}
+                {photoMessage !== "" && (
+                  <Text style={styles.photoMessage}>
+                    {photoMessage}
+                  </Text>
+                )}
+                <TouchableOpacity
+                  style={styles.photoActionButton}
+                  onPress={openParticipantPhotoCamera}
+                  disabled={photoUploading}
+                >
+                  <Text style={styles.photoActionButtonText}>
+                    {participant?.image_url
+                      ? "CAPTURE NEW PHOTO"
+                      : "OPEN BACK CAMERA"}
+                  </Text>
+                </TouchableOpacity>
+                <Text style={styles.photoModalHint}>
+                  Take a live photo using the phone's rear camera.
                 </Text>
-                <Text style={styles.photoPreviewPlaceholderText}>
-                  No photograph added yet
-                </Text>
-              </View>
+              </>
             )}
-            {photoMessage !== "" && (
-              <Text style={styles.photoMessage}>
-                {photoMessage}
-              </Text>
-            )}
-            <TouchableOpacity
-              style={styles.photoActionButton}
-              onPress={editParticipantPhoto}
-              disabled={photoUploading}
-            >
-              {photoUploading ? (
-                <ActivityIndicator color="#FFFFFF" />
-              ) : (
-                <Text style={styles.photoActionButtonText}>
-                  {participant?.image_url ? "CHANGE PHOTO" : "ADD PHOTO"}
+            {photoMessage !== "" &&
+              (photoCameraOpen || capturedPhotoUri) && (
+                <Text style={styles.photoMessage}>
+                  {photoMessage}
                 </Text>
               )}
-            </TouchableOpacity>
-            <Text style={styles.photoModalHint}>
-              The photograph is saved permanently to this participant's profile.
-            </Text>
           </View>
         </View>
       </Modal>
@@ -1250,5 +1397,29 @@ const styles = StyleSheet.create({
     fontSize: 11,
     textAlign: "center",
     marginTop: 10,
+  },
+  photoCameraWrap: {
+    width: 280,
+    height: 340,
+    maxWidth: "100%",
+    borderRadius: 14,
+    overflow: "hidden",
+    backgroundColor: "#101A28",
+  },
+  photoButtonRow: {
+    width: "100%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  photoSecondaryButton: {
+    backgroundColor: "#64748B",
+  },
+  photoActionHalf: {
+    flex: 1,
+    minWidth: 0,
+    width: undefined,
+    alignItems: "center",
+    justifyContent: "center",
   },
 });
