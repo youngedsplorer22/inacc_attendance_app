@@ -7,17 +7,14 @@ import {
   Users, UserCheck, UserX, Building2, Clock3, X
 } from 'lucide-react'
 import './styles.css'
-
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'https://inaccattendanceapp-production.up.railway.app').replace(/\/$/, '')
 const TOKEN_KEY = 'inaac_admin_token'
-
 function localToday() {
   // Use India local date regardless of the computer's timezone.
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'
   }).format(new Date())
 }
-
 function formatDateTime(value) {
   if (!value) return '—'
   const d = new Date(value)
@@ -27,7 +24,6 @@ function formatDateTime(value) {
     year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true
   }).format(d)
 }
-
 async function apiRequest(path, { token, method = 'GET', body } = {}) {
   const headers = {}
   if (token) headers.Authorization = `Bearer ${token}`
@@ -43,7 +39,6 @@ async function apiRequest(path, { token, method = 'GET', body } = {}) {
   }
   return data
 }
-
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '')
   const [checkingSession, setCheckingSession] = useState(Boolean(localStorage.getItem(TOKEN_KEY)))
@@ -53,6 +48,7 @@ function App() {
   const [employees, setEmployees] = useState([])
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [teamFilter, setTeamFilter] = useState('')
   const [expanded, setExpanded] = useState(null)
   const [loading, setLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState(null)
@@ -60,7 +56,6 @@ function App() {
   const [loginError, setLoginError] = useState('')
   const [loginBusy, setLoginBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
-
   const logout = useCallback(async (notify = false) => {
     const oldToken = token
     setToken('')
@@ -74,7 +69,6 @@ function App() {
     }
     if (notify) setLoginError('Your session has ended. Please sign in again.')
   }, [token])
-
   const loadDashboard = useCallback(async (showSpinner = false) => {
     if (!token) return
     if (showSpinner) setRefreshing(true)
@@ -99,7 +93,6 @@ function App() {
       setRefreshing(false)
     }
   }, [token, date, logout])
-
   useEffect(() => {
     if (!token) { setCheckingSession(false); return }
     let cancelled = false
@@ -114,7 +107,6 @@ function App() {
       .finally(() => { if (!cancelled) setCheckingSession(false) })
     return () => { cancelled = true }
   }, [token])
-
   useEffect(() => {
     if (!token || checkingSession) return
     setLoading(true)
@@ -122,7 +114,6 @@ function App() {
     const interval = window.setInterval(() => loadDashboard(), 10000)
     return () => window.clearInterval(interval)
   }, [token, checkingSession, loadDashboard])
-
   async function handleLogin(event) {
     event.preventDefault()
     setLoginError('')
@@ -145,21 +136,34 @@ function App() {
       setLoginBusy(false)
     }
   }
-
   const filteredEmployees = useMemo(() => {
     const q = search.trim().toLowerCase()
+    const team = teamFilter.trim().toLowerCase()
     return employees.filter(person => {
       const matchesSearch = !q || [
-        person.roll_no, person.child_name, person.phone_no, person.email,
-        person.school_name, person.city, person.state, person.team_no, person.group_no
-      ].some(value => String(value ?? '').toLowerCase().includes(q))
-      const matchesStatus = statusFilter === 'all' || person.attendance_status === statusFilter
-      return matchesSearch && matchesStatus
+        person.roll_no,
+        person.child_name,
+        person.phone_no,
+        person.email,
+        person.school_name,
+        person.city,
+        person.state,
+        person.team_no,
+        person.group_no
+      ].some(value =>
+        String(value ?? '').toLowerCase().includes(q)
+      )
+      const matchesStatus =
+        statusFilter === 'all' ||
+        person.attendance_status === statusFilter
+      const matchesTeam =
+        !team ||
+        String(person.team_no ?? '').trim().toLowerCase() === team
+      return matchesSearch && matchesStatus && matchesTeam
     })
-  }, [employees, search, statusFilter])
-
+  }, [employees, search, statusFilter, teamFilter])
   function exportExcel() {
-    const rows = employees.map((p, index) => ({
+    const rows = filteredEmployees.map((p, index) => ({
       'S. No.': index + 1,
       'Roll No.': p.roll_no ?? '',
       'Participant Name': p.child_name ?? '',
@@ -191,7 +195,7 @@ function App() {
       ['INAAC Attendance Report'],
       ['Selected date (IST)', date],
       ['Generated at (IST)', formatDateTime(new Date().toISOString())],
-      ['Total participants', employees.length],
+      ['Filtered participants', filteredEmployees.length],
       ['Present today', summary?.present_today ?? 0],
       ['Currently inside', summary?.currently_inside ?? 0],
       ['Absent today', summary?.absent_today ?? 0]
@@ -199,22 +203,18 @@ function App() {
     XLSX.utils.book_append_sheet(workbook, meta, 'Report Summary')
     XLSX.writeFile(workbook, `INAAC_Attendance_${date}.xlsx`)
   }
-
   if (checkingSession) {
     return <div className="screen-center"><div className="loader large" /><span>Verifying admin session…</span></div>
   }
-
   if (!token) {
     return <LoginScreen onSubmit={handleLogin} error={loginError} busy={loginBusy} />
   }
-
   const cards = [
     { label: 'Total participants', value: summary?.total_employees ?? '—', icon: Users, tone: 'blue', note: 'Registered in database' },
     { label: 'Present today', value: summary?.present_today ?? '—', icon: UserCheck, tone: 'green', note: 'Attendance recorded' },
     { label: 'Currently inside', value: summary?.currently_inside ?? '—', icon: Building2, tone: 'violet', note: 'Live premises status' },
     { label: 'Absent today', value: summary?.absent_today ?? '—', icon: UserX, tone: 'amber', note: 'No check-in on selected date' }
   ]
-
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -233,7 +233,6 @@ function App() {
           </div>
         </div>
       </aside>
-
       <main className="main-content">
         <header className="topbar">
           <div>
@@ -249,9 +248,7 @@ function App() {
             <button className="mobile-logout" onClick={() => logout()}><LogOut size={17} /></button>
           </div>
         </header>
-
         {error && <div className="error-banner"><X size={17} />{error}<button onClick={() => loadDashboard(true)}>Retry</button></div>}
-
         <section className="toolbar">
           <div className="date-control">
             <CalendarDays size={18} />
@@ -262,7 +259,6 @@ function App() {
             <span className="status-dot" /> {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString('en-IN')}` : 'Loading data…'}
           </div>
         </section>
-
         <section className="stats-grid">
           {cards.map(card => {
             const Icon = card.icon
@@ -274,7 +270,6 @@ function App() {
             </article>
           })}
         </section>
-
         <section className="table-panel">
           <div className="table-heading">
             <div>
@@ -286,12 +281,29 @@ function App() {
               <FileSpreadsheet size={17} /> Export Excel <Download size={15} />
             </button>
           </div>
-
           <div className="table-controls">
             <div className="search-box">
               <Search size={17} />
               <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name, roll no., phone, school…" />
               {search && <button onClick={() => setSearch('')} aria-label="Clear search"><X size={15} /></button>}
+            </div>
+            <div className="search-box team-filter-box">
+              <Users size={17} />
+              <input
+                type="text"
+                inputMode="numeric"
+                placeholder="Filter by team no."
+                value={teamFilter}
+                onChange={e => setTeamFilter(e.target.value)}
+              />
+              {teamFilter && (
+                <button
+                  onClick={() => setTeamFilter('')}
+                  aria-label="Clear team filter"
+                >
+                  <X size={15} />
+                </button>
+              )}
             </div>
             <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} aria-label="Filter attendance status">
               <option value="all">All statuses</option>
@@ -301,7 +313,6 @@ function App() {
             </select>
             <span className="record-count">{filteredEmployees.length} of {employees.length} records</span>
           </div>
-
           <div className="spreadsheet-wrap">
             <table className="spreadsheet">
               <thead>
@@ -369,7 +380,6 @@ function App() {
     </div>
   )
 }
-
 function LoginScreen({ onSubmit, error, busy }) {
   const [showPassword, setShowPassword] = useState(false)
   return <div className="login-screen">
@@ -396,15 +406,12 @@ function LoginScreen({ onSubmit, error, busy }) {
     <div className="login-caption">INAAC · ATTENDANCE ADMINISTRATION</div>
   </div>
 }
-
 function StatusPill({ status }) {
   const value = status || 'absent'
   const label = value === 'present' ? 'Present' : value === 'dispersed' ? 'Dispersed' : 'Absent'
   return <span className={`status-pill ${value}`}><span />{label}</span>
 }
-
 function Detail({ label, value }) {
   return <div className="detail-item"><span>{label}</span><strong>{value || '—'}</strong></div>
 }
-
 createRoot(document.getElementById('root')).render(<App />)

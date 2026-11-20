@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from "react";
-import * as FileSystem from "expo-file-system/legacy";
 import {
   ActivityIndicator,
   Alert,
@@ -17,7 +16,7 @@ import {
   Modal,
 } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
-// IMPORTANT: Replace with your computer's Wi-Fi IPv4 address.
+// Production API hosted on Railway.
 const API_BASE_URL = "https://inaccattendanceapp-production.up.railway.app";
 const ALLOWED_QR_HOSTS = [
   "group1.inacc.in",
@@ -76,6 +75,9 @@ export default function App() {
   const [photoCameraOpen, setPhotoCameraOpen] = useState(false);
   const [capturedPhotoUri, setCapturedPhotoUri] = useState(null);
   const [photoMessage, setPhotoMessage] = useState("");
+  const [isEditingParticipant, setIsEditingParticipant] = useState(false);
+  const [editedParticipant, setEditedParticipant] = useState({});
+  const [participantSaving, setParticipantSaving] = useState(false);
   const photoCameraRef = useRef(null);
   useEffect(() => {
     if (screen === "scanner") {
@@ -126,7 +128,7 @@ export default function App() {
     } catch (error) {
       Alert.alert(
         "Could not fetch participant",
-        `${error.message}\n\nCheck that the backend is running and API_BASE_URL contains your computer's Wi-Fi IP address.`
+        `${error.message}\n\nPlease check your internet connection and try again.`
       );
     } finally {
       setLoading(false);
@@ -240,30 +242,30 @@ export default function App() {
         }
       );
       const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(
-            data.detail ||
-            data.message ||
-            `Dispersal failed (${response.status})`
-          );
-        }
-        if (data.success === false) {
-          throw new Error(
-            data.message || "Dispersal could not be recorded."
-          );
-        }
-        setDispersalStatus("dispersed");
-        setActionMessage(
-          `${participant.child_name} has been successfully marked as DISPERSED.`
+      if (!response.ok) {
+        throw new Error(
+          data.detail ||
+          data.message ||
+          `Dispersal failed (${response.status})`
         );
-      } catch (error) {
-        setActionMessage(
-          `Dispersal failed: ${error.message}`
-        );
-      } finally {
-        setAttendanceLoading(false);
       }
+      if (data.success === false) {
+        throw new Error(
+          data.message || "Dispersal could not be recorded."
+        );
+      }
+      setDispersalStatus("dispersed");
+      setActionMessage(
+        `${participant.child_name} has been successfully marked as DISPERSED.`
+      );
+    } catch (error) {
+      setActionMessage(
+        `Dispersal failed: ${error.message}`
+      );
+    } finally {
+      setAttendanceLoading(false);
     }
+  }
   async function openParticipantPhotoCamera() {
     if (!participant?.roll_no || photoUploading) return;
     setPhotoMessage("");
@@ -271,9 +273,7 @@ export default function App() {
     if (!permission?.granted) {
       const result = await requestPermission();
       if (!result.granted) {
-        setPhotoMessage(
-          "Please allow camera access to capture the participant photo."
-        );
+        setPhotoMessage("Please allow camera access to capture the participant photo.");
         return;
       }
     }
@@ -287,7 +287,7 @@ export default function App() {
         skipProcessing: false,
       });
       if (!photo?.uri) {
-        throw new Error("Camera did not return a photo.");
+        throw new Error("The camera did not return a photo. Please try again.");
       }
       setCapturedPhotoUri(photo.uri);
       setPhotoCameraOpen(false);
@@ -297,78 +297,30 @@ export default function App() {
     }
   }
   async function saveParticipantPhoto() {
-    if (!participant?.roll_no || !capturedPhotoUri || photoUploading) {
-      return;
-    }
+    if (!participant?.roll_no || !capturedPhotoUri || photoUploading) return;
     setPhotoUploading(true);
     setPhotoMessage("");
     try {
-      const uploadUrl =
+      const formData = new FormData();
+      formData.append("file", {
+        uri: capturedPhotoUri,
+        name: `participant_${participant.roll_no}.jpg`,
+        type: "image/jpeg",
+      });
+      const response = await fetch(
         `${API_BASE_URL}/api/v1/participants/${encodeURIComponent(
           participant.roll_no
-        )}/photo`;
-      let data = {};
-      let status = 0;
-      if (Platform.OS === "web") {
-        // Browser upload
-        const imageResponse = await fetch(capturedPhotoUri);
-        if (!imageResponse.ok) {
-          throw new Error("Unable to read captured photo.");
+        )}/photo`,
+        {
+          method: "POST",
+          body: formData,
         }
-        const blob = await imageResponse.blob();
-        const formData = new globalThis.FormData();
-        formData.append(
-          "file",
-          blob,
-          `participant_${participant.roll_no}.jpg`
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(
+          data.detail || data.message || "Photo upload failed."
         );
-        const result = await new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open("POST", uploadUrl);
-          xhr.onload = () => {
-            let responseData = {};
-            try {
-              responseData = JSON.parse(xhr.responseText);
-            } catch {
-              responseData = {};
-            }
-            resolve({
-              status: xhr.status,
-              data: responseData,
-            });
-          };
-          xhr.onerror = () => reject(new Error("Network upload failed."));
-          xhr.send(formData);
-        });
-        status = result.status;
-        data = result.data;
-      } else {
-        // Native Android / iOS upload using Expo FileSystem
-        const result = await FileSystem.uploadAsync(
-          uploadUrl,
-          capturedPhotoUri,
-          {
-            httpMethod: "POST",
-            uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-            fieldName: "file",
-            mimeType: "image/jpeg",
-          }
-        );
-        status = result.status;
-        try {
-          data = JSON.parse(result.body);
-        } catch {
-          data = {};
-        }
-      }
-      if (status < 200 || status >= 300 || !data.success) {
-        const detail =
-          typeof data.detail === "string"
-            ? data.detail
-            : typeof data.message === "string"
-            ? data.message
-            : JSON.stringify(data.detail || data);
-        throw new Error(detail || `Upload failed (${status}).`);
       }
       setParticipant((previous) => ({
         ...previous,
@@ -376,14 +328,78 @@ export default function App() {
         cloudinary_public_id: data.cloudinary_public_id,
       }));
       setCapturedPhotoUri(null);
-      setPhotoMessage("Photo saved successfully.");
+      setPhotoMessage("Photo saved successfully across all event days.");
     } catch (error) {
-      console.error("Photo upload error:", error);
-      setPhotoMessage(
-        `Photo upload failed: ${error.message || String(error)}`
-      );
+      setPhotoMessage(`Photo upload failed: ${error.message}`);
     } finally {
       setPhotoUploading(false);
+    }
+  }
+  // -----------------------------------------
+  // EDIT PARTICIPANT DETAILS
+  // -----------------------------------------
+  function startEditingParticipant() {
+    if (!participant) return;
+    setEditedParticipant({
+      roll_no: participant.roll_no ?? "",
+      child_name: participant.child_name ?? "",
+      phone_no: participant.phone_no ?? "",
+      email: participant.email ?? "",
+      school_name: participant.school_name ?? "",
+      city: participant.city ?? "",
+      state: participant.state ?? "",
+      region: participant.region ?? "",
+      grade: participant.grade ?? "",
+      team_no: participant.team_no ?? "",
+      group_no: participant.group_no ?? "",
+    });
+    setIsEditingParticipant(true);
+    setActionMessage("");
+  }
+  function updateEditedField(field, value) {
+    setEditedParticipant((previous) => ({ ...previous, [field]: value }));
+  }
+  async function saveParticipantDetails() {
+    if (!participant?.roll_no || participantSaving) return;
+    const originalRollNo = participant.roll_no;
+    const payload = Object.fromEntries(
+      Object.entries(editedParticipant).map(([key, value]) => [
+        key,
+        typeof value === "string" ? value.trim() : value,
+      ])
+    );
+    if (!payload.roll_no || !payload.child_name) {
+      Alert.alert(
+        "Required information missing",
+        "Roll number and participant name cannot be blank."
+      );
+      return;
+    }
+    setParticipantSaving(true);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/v1/participants/${encodeURIComponent(originalRollNo)}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success || !data.participant) {
+        throw new Error(data.detail || data.message || `Update failed (${response.status}).`);
+      }
+      setParticipant((previous) => ({ ...previous, ...data.participant }));
+      setRollNo(data.participant.roll_no);
+      setIsEditingParticipant(false);
+      Alert.alert("Details updated", "Participant information has been saved successfully.");
+    } catch (error) {
+      Alert.alert("Could not update participant", error.message);
+    } finally {
+      setParticipantSaving(false);
     }
   }
   // -----------------------------------------
@@ -421,6 +437,8 @@ export default function App() {
   function goHome() {
     // Clear previous participant details
     setParticipant(null);
+    setIsEditingParticipant(false);
+    setEditedParticipant({});
     // Clear search field
     setRollNo("");
     // Reset attendance and dispersal states
@@ -594,18 +612,73 @@ export default function App() {
                   Roll No: {participant?.roll_no}
                 </Text>
               </View>
+              {!isEditingParticipant ? (
+                <TouchableOpacity
+                  style={styles.editDetailsButton}
+                  onPress={startEditingParticipant}
+                  disabled={participantSaving}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.editDetailsButtonText}>✎  EDIT PARTICIPANT DETAILS</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.editDetailsHeader}>
+                  <Text style={styles.editDetailsTitle}>Edit Participant Details</Text>
+                  <Text style={styles.editDetailsSubtitle}>Update the information below and save your changes.</Text>
+                </View>
+              )}
               {/* PARTICIPANT DETAILS */}
               <View style={styles.detailsCard}>
-                <Detail label="Email" value={participant?.email} />
-                <Detail label="School" value={participant?.school_name} />
-                <Detail label="City" value={participant?.city} />
-                <Detail label="State" value={participant?.state} />
-                <Detail label="Region" value={participant?.region} />
-                <Detail label="Grade" value={participant?.grade} />
-                <Detail label="Phone" value={participant?.phone_no} />
-                <Detail label="Team No." value={participant?.team_no} />
-                <Detail label="Group No." value={participant?.group_no} last />
+                {isEditingParticipant ? (
+                  <>
+                    <EditField label="Roll Number *" value={editedParticipant.roll_no} onChangeText={(v) => updateEditedField("roll_no", v)} autoCapitalize="characters" />
+                    <EditField label="Child Name *" value={editedParticipant.child_name} onChangeText={(v) => updateEditedField("child_name", v)} />
+                    <EditField label="Phone Number" value={editedParticipant.phone_no} onChangeText={(v) => updateEditedField("phone_no", v)} keyboardType="phone-pad" />
+                    <EditField label="Email" value={editedParticipant.email} onChangeText={(v) => updateEditedField("email", v)} keyboardType="email-address" autoCapitalize="none" />
+                    <EditField label="School Name" value={editedParticipant.school_name} onChangeText={(v) => updateEditedField("school_name", v)} />
+                    <EditField label="City" value={editedParticipant.city} onChangeText={(v) => updateEditedField("city", v)} />
+                    <EditField label="State" value={editedParticipant.state} onChangeText={(v) => updateEditedField("state", v)} />
+                    <EditField label="Region" value={editedParticipant.region} onChangeText={(v) => updateEditedField("region", v)} />
+                    <EditField label="Grade" value={editedParticipant.grade} onChangeText={(v) => updateEditedField("grade", v)} />
+                    <EditField label="Team Number" value={editedParticipant.team_no} onChangeText={(v) => updateEditedField("team_no", v)} />
+                    <EditField label="Group Number" value={editedParticipant.group_no} onChangeText={(v) => updateEditedField("group_no", v)} />
+                  </>
+                ) : (
+                  <>
+                    <Detail label="Email" value={participant?.email} />
+                    <Detail label="School" value={participant?.school_name} />
+                    <Detail label="City" value={participant?.city} />
+                    <Detail label="State" value={participant?.state} />
+                    <Detail label="Region" value={participant?.region} />
+                    <Detail label="Grade" value={participant?.grade} />
+                    <Detail label="Phone" value={participant?.phone_no} />
+                    <Detail label="Team No." value={participant?.team_no} />
+                    <Detail label="Group No." value={participant?.group_no} last />
+                  </>
+                )}
               </View>
+              {isEditingParticipant && (
+                <View style={styles.editActionsRow}>
+                  <TouchableOpacity
+                    style={[styles.editActionButton, styles.cancelEditButton]}
+                    onPress={() => setIsEditingParticipant(false)}
+                    disabled={participantSaving}
+                  >
+                    <Text style={styles.cancelEditButtonText}>CANCEL</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.editActionButton, styles.saveEditButton, participantSaving && styles.attendanceButtonDisabled]}
+                    onPress={saveParticipantDetails}
+                    disabled={participantSaving}
+                  >
+                    {participantSaving ? (
+                      <ActivityIndicator color="#FFFFFF" />
+                    ) : (
+                      <Text style={styles.saveEditButtonText}>SAVE CHANGES</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
               {/* ATTENDANCE AND DISPERSAL BUTTONS */}
               <View style={styles.attendanceButtonRow}>
                 {/* MARK PRESENT */}
@@ -711,8 +784,8 @@ export default function App() {
               {photoCameraOpen
                 ? "Capture Student Photo"
                 : capturedPhotoUri
-                ? "Review Student Photo"
-                : "Participant Photograph"}
+                  ? "Review Student Photo"
+                  : "Participant Photograph"}
             </Text>
             <Text style={styles.photoModalSubtitle}>
               {participant?.child_name} · Roll No. {participant?.roll_no}
@@ -733,10 +806,9 @@ export default function App() {
                 <TouchableOpacity
                   style={styles.photoActionButton}
                   onPress={captureParticipantPhoto}
+                  disabled={photoUploading}
                 >
-                  <Text style={styles.photoActionButtonText}>
-                    CAPTURE PHOTO
-                  </Text>
+                  <Text style={styles.photoActionButtonText}>CAPTURE PHOTO</Text>
                 </TouchableOpacity>
               </>
             ) : capturedPhotoUri ? (
@@ -748,29 +820,21 @@ export default function App() {
                 />
                 <View style={styles.photoButtonRow}>
                   <TouchableOpacity
-                    style={[
-                      styles.photoActionButton,
-                      styles.photoSecondaryButton,
-                      styles.photoActionHalf
-                    ]}
+                    style={[styles.photoActionButton, styles.photoActionButtonCompact, styles.photoSecondaryButton]}
                     onPress={openParticipantPhotoCamera}
                     disabled={photoUploading}
                   >
-                    <Text style={styles.photoActionButtonText}>
-                      RETAKE
-                    </Text>
+                    <Text style={styles.photoActionButtonText}>RETAKE</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.photoActionButton, styles.photoActionHalf]}
+                    style={[styles.photoActionButton, styles.photoActionButtonCompact]}
                     onPress={saveParticipantPhoto}
                     disabled={photoUploading}
                   >
                     {photoUploading ? (
                       <ActivityIndicator color="#FFFFFF" />
                     ) : (
-                      <Text style={styles.photoActionButtonText}>
-                        SAVE PHOTO
-                      </Text>
+                      <Text style={styles.photoActionButtonText}>SAVE PHOTO</Text>
                     )}
                   </TouchableOpacity>
                 </View>
@@ -794,9 +858,7 @@ export default function App() {
                   </View>
                 )}
                 {photoMessage !== "" && (
-                  <Text style={styles.photoMessage}>
-                    {photoMessage}
-                  </Text>
+                  <Text style={styles.photoMessage}>{photoMessage}</Text>
                 )}
                 <TouchableOpacity
                   style={styles.photoActionButton}
@@ -804,22 +866,17 @@ export default function App() {
                   disabled={photoUploading}
                 >
                   <Text style={styles.photoActionButtonText}>
-                    {participant?.image_url
-                      ? "CAPTURE NEW PHOTO"
-                      : "OPEN BACK CAMERA"}
+                    {participant?.image_url ? "CAPTURE NEW PHOTO" : "OPEN BACK CAMERA"}
                   </Text>
                 </TouchableOpacity>
                 <Text style={styles.photoModalHint}>
-                  Take a live photo using the phone's rear camera.
+                  Take a live photo using the phone's rear camera. The saved photo updates this participant's profile.
                 </Text>
               </>
             )}
-            {photoMessage !== "" &&
-              (photoCameraOpen || capturedPhotoUri) && (
-                <Text style={styles.photoMessage}>
-                  {photoMessage}
-                </Text>
-              )}
+            {photoMessage !== "" && (photoCameraOpen || capturedPhotoUri) && (
+              <Text style={styles.photoMessage}>{photoMessage}</Text>
+            )}
           </View>
         </View>
       </Modal>
@@ -874,6 +931,32 @@ export default function App() {
         </View>
       </Modal>
     </SafeAreaView>
+  );
+}
+// -----------------------------------------
+// PARTICIPANT EDIT FIELD COMPONENT
+// -----------------------------------------
+function EditField({
+  label,
+  value,
+  onChangeText,
+  keyboardType = "default",
+  autoCapitalize = "words",
+}) {
+  return (
+    <View style={styles.editFieldWrap}>
+      <Text style={styles.editFieldLabel}>{label}</Text>
+      <TextInput
+        style={styles.editFieldInput}
+        value={value ?? ""}
+        onChangeText={onChangeText}
+        placeholder={`Enter ${label.replace(" *", "").toLowerCase()}`}
+        placeholderTextColor="#9AA5B4"
+        keyboardType={keyboardType}
+        autoCapitalize={autoCapitalize}
+        autoCorrect={false}
+      />
+    </View>
   );
 }
 // -----------------------------------------
@@ -1093,6 +1176,86 @@ const styles = StyleSheet.create({
     color: "#6F7F93",
     marginTop: 5,
     fontWeight: "600",
+  },
+  editDetailsButton: {
+    backgroundColor: "#173B63",
+    borderRadius: 12,
+    minHeight: 48,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+    paddingHorizontal: 14,
+  },
+  editDetailsButtonText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "900",
+    letterSpacing: 0.4,
+  },
+  editDetailsHeader: {
+    marginBottom: 12,
+  },
+  editDetailsTitle: {
+    color: "#142B4A",
+    fontSize: 17,
+    fontWeight: "900",
+  },
+  editDetailsSubtitle: {
+    color: "#718096",
+    fontSize: 12,
+    marginTop: 4,
+  },
+  editFieldWrap: {
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+    borderBottomColor: "#EDF0F4",
+  },
+  editFieldLabel: {
+    color: "#758398",
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 6,
+  },
+  editFieldInput: {
+    minHeight: 43,
+    borderWidth: 1,
+    borderColor: "#D9E0E9",
+    borderRadius: 9,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    color: "#172B45",
+    backgroundColor: "#FAFBFC",
+    fontSize: 14,
+  },
+  editActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 12,
+  },
+  editActionButton: {
+    flex: 1,
+    minHeight: 48,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cancelEditButton: {
+    borderWidth: 1.5,
+    borderColor: "#173B63",
+    backgroundColor: "#FFFFFF",
+  },
+  cancelEditButtonText: {
+    color: "#173B63",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+  saveEditButton: {
+    backgroundColor: "#16865D",
+  },
+  saveEditButtonText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "900",
   },
   detailsCard: {
     backgroundColor: "#FFFFFF",
@@ -1352,6 +1515,26 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     backgroundColor: "#F1F5F9",
   },
+  photoCameraWrap: {
+    width: 280,
+    height: 340,
+    maxWidth: "100%",
+    borderRadius: 14,
+    overflow: "hidden",
+    backgroundColor: "#101A28",
+  },
+  photoButtonRow: {
+    width: "100%",
+    flexDirection: "row",
+    gap: 10,
+  },
+  photoActionButtonCompact: {
+    flex: 1,
+    width: "auto",
+  },
+  photoSecondaryButton: {
+    backgroundColor: "#64748B",
+  },
   photoPreviewPlaceholder: {
     width: 260,
     height: 260,
@@ -1397,29 +1580,5 @@ const styles = StyleSheet.create({
     fontSize: 11,
     textAlign: "center",
     marginTop: 10,
-  },
-  photoCameraWrap: {
-    width: 280,
-    height: 340,
-    maxWidth: "100%",
-    borderRadius: 14,
-    overflow: "hidden",
-    backgroundColor: "#101A28",
-  },
-  photoButtonRow: {
-    width: "100%",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  photoSecondaryButton: {
-    backgroundColor: "#64748B",
-  },
-  photoActionHalf: {
-    flex: 1,
-    minWidth: 0,
-    width: undefined,
-    alignItems: "center",
-    justifyContent: "center",
   },
 });

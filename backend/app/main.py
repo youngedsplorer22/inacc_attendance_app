@@ -76,6 +76,18 @@ def get_connection():
     )
 class AttendanceRequest(BaseModel):
     event_day: int = Field(ge=1, le=4)
+class ParticipantUpdateRequest(BaseModel):
+    roll_no: str | None = Field(default=None, max_length=30)
+    child_name: str | None = Field(default=None, max_length=200)
+    phone_no: str | None = Field(default=None, max_length=50)
+    email: str | None = Field(default=None, max_length=254)
+    school_name: str | None = Field(default=None, max_length=250)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=120)
+    region: str | None = Field(default=None, max_length=120)
+    grade: str | None = Field(default=None, max_length=50)
+    team_no: str | None = Field(default=None, max_length=50)
+    group_no: str | None = Field(default=None, max_length=50)
 @app.get("/")
 def root():
     return {
@@ -157,6 +169,89 @@ def get_participant(
     return {
         "success": True,
         "participant": participant,
+    }
+# --------------------------------------------------
+# UPDATE PARTICIPANT DETAILS
+# --------------------------------------------------
+@app.patch("/api/v1/participants/{roll_no}")
+def update_participant(
+    roll_no: str,
+    request: ParticipantUpdateRequest,
+):
+    current_roll_no = roll_no.strip()
+    if not current_roll_no:
+        raise HTTPException(status_code=400, detail="Invalid roll number.")
+    updates = request.dict(exclude_unset=True)
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="No participant details were provided for update.",
+        )
+    if "roll_no" in updates:
+        if updates["roll_no"] is None or not updates["roll_no"].strip():
+            raise HTTPException(status_code=400, detail="Roll number cannot be blank.")
+        updates["roll_no"] = updates["roll_no"].strip()
+    if "child_name" in updates:
+        if updates["child_name"] is None or not updates["child_name"].strip():
+            raise HTTPException(status_code=400, detail="Participant name cannot be blank.")
+        updates["child_name"] = updates["child_name"].strip()
+    allowed_columns = {
+        "roll_no", "child_name", "phone_no", "email", "school_name",
+        "city", "state", "region", "grade", "team_no", "group_no",
+    }
+    updates = {
+        column: value.strip() if isinstance(value, str) else value
+        for column, value in updates.items()
+        if column in allowed_columns
+    }
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid participant fields were provided.")
+    with get_connection() as conn:
+        participant = conn.execute(
+            """
+            SELECT id, roll_no
+            FROM participants
+            WHERE roll_no = %s
+            FOR UPDATE
+            """,
+            (current_roll_no,),
+        ).fetchone()
+        if participant is None:
+            raise HTTPException(status_code=404, detail="Participant not found.")
+        new_roll_no = updates.get("roll_no")
+        if new_roll_no and new_roll_no != current_roll_no:
+            duplicate = conn.execute(
+                """
+                SELECT id
+                FROM participants
+                WHERE roll_no = %s AND id <> %s
+                """,
+                (new_roll_no, participant["id"]),
+            ).fetchone()
+            if duplicate:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Roll number {new_roll_no} is already assigned to another participant.",
+                )
+        set_clause = ", ".join(f"{column} = %s" for column in updates.keys())
+        values = list(updates.values()) + [participant["id"]]
+        updated = conn.execute(
+            f"""
+            UPDATE participants
+            SET {set_clause},
+                updated_at = NOW()
+            WHERE id = %s
+            RETURNING
+                id, roll_no, child_name, phone_no, email, school_name,
+                city, state, region, grade, team_no, group_no,
+                image_url, cloudinary_public_id, in_premise
+            """,
+            values,
+        ).fetchone()
+    return {
+        "success": True,
+        "message": "Participant details updated successfully.",
+        "participant": updated,
     }
 # --------------------------------------------------
 # MARK PRESENT
