@@ -14,6 +14,8 @@ import time
 import hmac
 import hashlib
 import base64
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -67,6 +69,89 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# --------------------------------------------------
+# DOUBLETICK WHATSAPP NOTIFICATIONS
+# --------------------------------------------------
+DOUBLETICK_API_KEY = os.getenv("DOUBLETICK_API_KEY")
+DOUBLETICK_FROM_NUMBER = os.getenv("DOUBLETICK_FROM_NUMBER", "+917048950667")
+DOUBLETICK_PRESENT_TEMPLATE = os.getenv(
+    "DOUBLETICK_PRESENT_TEMPLATE", "inacc_parent_consent_form"
+)
+DOUBLETICK_DISPERSAL_TEMPLATE = os.getenv("DOUBLETICK_DISPERSAL_TEMPLATE", "")
+DOUBLETICK_LANGUAGE = os.getenv("DOUBLETICK_LANGUAGE", "en")
+DOUBLETICK_API_URL = "https://public.doubletick.io/v2/whatsapp/message/template"
+def normalize_whatsapp_number(raw_number):
+    """Return an international-format number, or None if it is unusable."""
+    if not raw_number:
+        return None
+    raw = str(raw_number).strip()
+    if raw.startswith("+"):
+        digits = "".join(ch for ch in raw[1:] if ch.isdigit())
+        return f"+{digits}" if 10 <= len(digits) <= 15 else None
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10:
+        # Local 10-digit numbers in this INAAC database are Indian numbers.
+        return f"+91{digits}"
+    if digits.startswith("91") and len(digits) == 12:
+        return f"+{digits}"
+    if digits.startswith("971") and len(digits) == 12:
+        return f"+{digits}"
+    if 10 <= len(digits) <= 15:
+        return f"+{digits}"
+    return None
+def send_doubletick_template(phone_number, template_name):
+    """
+    Enqueue a DoubleTick V2 template message.
+    This function is called only after the attendance transaction commits.
+    WhatsApp failures are returned as status data and never undo attendance.
+    """
+    if not template_name:
+        return {"status": "SKIPPED", "reason": "No template configured"}
+    if not DOUBLETICK_API_KEY:
+        return {"status": "SKIPPED", "reason": "DOUBLETICK_API_KEY is not configured"}
+    recipient = normalize_whatsapp_number(phone_number)
+    if not recipient:
+        return {"status": "SKIPPED", "reason": "Participant phone number is missing or invalid"}
+    payload = {
+        "messages": [
+            {
+                "from": DOUBLETICK_FROM_NUMBER,
+                "to": recipient,
+                "content": {
+                    "templateName": template_name,
+                    "language": DOUBLETICK_LANGUAGE,
+                    "templateData": {},
+                },
+            }
+        ]
+    }
+    request = urllib.request.Request(
+        DOUBLETICK_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": DOUBLETICK_API_KEY,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw_response = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw_response) if raw_response else {}
+            result = parsed[0] if isinstance(parsed, list) and parsed else parsed
+            return {
+                "status": result.get("status", "ACCEPTED") if isinstance(result, dict) else "ACCEPTED",
+                "message_id": result.get("messageId") if isinstance(result, dict) else None,
+            }
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        # Do not expose the API key or full recipient number in logs/API response.
+        print(f"DoubleTick HTTP error {exc.code}: {error_body[:500]}")
+        return {"status": "FAILED", "reason": f"DoubleTick HTTP {exc.code}"}
+    except Exception as exc:
+        print(f"DoubleTick request failed: {type(exc).__name__}: {exc}")
+        return {"status": "FAILED", "reason": "DoubleTick request failed"}
 def get_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is missing. Check backend/.env")
@@ -266,7 +351,7 @@ def mark_present(
         # Lock participant to prevent simultaneous updates.
         participant = conn.execute(
             """
-            SELECT id, roll_no, in_premise
+            SELECT id, roll_no, in_premise, phone_no, child_name
             FROM participants
             WHERE roll_no = %s
             FOR UPDATE
@@ -347,12 +432,18 @@ def mark_present(
             """,
             (participant["id"],),
         )
+    # Send only for a newly created attendance record, after the DB commit.
+    whatsapp = send_doubletick_template(
+        participant.get("phone_no"),
+        DOUBLETICK_PRESENT_TEMPLATE,
+    )
     return {
         "success": True,
         "message": "Attendance marked successfully.",
         "already_marked": False,
         "in_premise": True,
         "attendance": attendance,
+        "whatsapp": whatsapp,
     }
 # --------------------------------------------------
 # MARK DISPERSAL
@@ -367,7 +458,7 @@ def mark_dispersal(
         # Lock participant during dispersal.
         participant = conn.execute(
             """
-            SELECT id, roll_no, in_premise
+            SELECT id, roll_no, in_premise, phone_no, child_name
             FROM participants
             WHERE roll_no = %s
             FOR UPDATE
@@ -453,12 +544,18 @@ def mark_dispersal(
             """,
             (participant["id"],),
         )
+    # Send only for a newly recorded dispersal, after the DB commit.
+    whatsapp = send_doubletick_template(
+        participant.get("phone_no"),
+        DOUBLETICK_DISPERSAL_TEMPLATE,
+    )
     return {
         "success": True,
         "message": "Dispersal marked successfully.",
         "already_dispersed": False,
         "in_premise": False,
         "attendance": attendance,
+        "whatsapp": whatsapp,
     }
 # --------------------------------------------------
 # PARTICIPANT ATTENDANCE HISTORY
