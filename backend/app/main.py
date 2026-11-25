@@ -69,6 +69,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # --------------------------------------------------
 # DOUBLETICK WHATSAPP NOTIFICATIONS
 # --------------------------------------------------
@@ -80,14 +81,18 @@ DOUBLETICK_PRESENT_TEMPLATE = os.getenv(
 DOUBLETICK_DISPERSAL_TEMPLATE = os.getenv("DOUBLETICK_DISPERSAL_TEMPLATE", "")
 DOUBLETICK_LANGUAGE = os.getenv("DOUBLETICK_LANGUAGE", "en")
 DOUBLETICK_API_URL = "https://public.doubletick.io/v2/whatsapp/message/template"
+
+
 def normalize_whatsapp_number(raw_number):
     """Return an international-format number, or None if it is unusable."""
     if not raw_number:
         return None
+
     raw = str(raw_number).strip()
     if raw.startswith("+"):
         digits = "".join(ch for ch in raw[1:] if ch.isdigit())
         return f"+{digits}" if 10 <= len(digits) <= 15 else None
+
     digits = "".join(ch for ch in raw if ch.isdigit())
     if len(digits) == 10:
         # Local 10-digit numbers in this INAAC database are Indian numbers.
@@ -99,6 +104,8 @@ def normalize_whatsapp_number(raw_number):
     if 10 <= len(digits) <= 15:
         return f"+{digits}"
     return None
+
+
 def send_doubletick_template(phone_number, template_name):
     """
     Enqueue a DoubleTick V2 template message.
@@ -107,11 +114,14 @@ def send_doubletick_template(phone_number, template_name):
     """
     if not template_name:
         return {"status": "SKIPPED", "reason": "No template configured"}
+
     if not DOUBLETICK_API_KEY:
         return {"status": "SKIPPED", "reason": "DOUBLETICK_API_KEY is not configured"}
+
     recipient = normalize_whatsapp_number(phone_number)
     if not recipient:
         return {"status": "SKIPPED", "reason": "Participant phone number is missing or invalid"}
+
     payload = {
         "messages": [
             {
@@ -125,6 +135,7 @@ def send_doubletick_template(phone_number, template_name):
             }
         ]
     }
+
     request = urllib.request.Request(
         DOUBLETICK_API_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -135,6 +146,7 @@ def send_doubletick_template(phone_number, template_name):
         },
         method="POST",
     )
+
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             raw_response = response.read().decode("utf-8", errors="replace")
@@ -152,6 +164,7 @@ def send_doubletick_template(phone_number, template_name):
     except Exception as exc:
         print(f"DoubleTick request failed: {type(exc).__name__}: {exc}")
         return {"status": "FAILED", "reason": "DoubleTick request failed"}
+
 def get_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is missing. Check backend/.env")
@@ -223,6 +236,7 @@ def get_participant(
                 p.phone_no,
                 p.team_no,
                 p.group_no,
+                p.seat_no,
                 p.image_url,
                 p.cloudinary_public_id,
                 p.in_premise,
