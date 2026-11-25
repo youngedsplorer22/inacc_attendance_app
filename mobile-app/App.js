@@ -100,7 +100,6 @@ export default function App() {
     setLoading(true);
     setParticipant(null);
     try {
-      // 
       const response = await fetch(
         `${API_BASE_URL}/api/v1/participants/${encodeURIComponent(cleanCode)}?event_day=${EVENT_DAY}`
       );
@@ -266,6 +265,9 @@ export default function App() {
       setAttendanceLoading(false);
     }
   }
+  // -----------------------------------------
+  // PARTICIPANT PHOTO
+  // -----------------------------------------
   async function openParticipantPhotoCamera() {
     if (!participant?.roll_no || photoUploading) return;
     setPhotoMessage("");
@@ -352,6 +354,7 @@ export default function App() {
       grade: participant.grade ?? "",
       team_no: participant.team_no ?? "",
       group_no: participant.group_no ?? "",
+      seat_no: participant.seat_no ?? "",
     });
     setIsEditingParticipant(true);
     setActionMessage("");
@@ -642,6 +645,7 @@ export default function App() {
                     <EditField label="Grade" value={editedParticipant.grade} onChangeText={(v) => updateEditedField("grade", v)} />
                     <EditField label="Team Number" value={editedParticipant.team_no} onChangeText={(v) => updateEditedField("team_no", v)} />
                     <EditField label="Group Number" value={editedParticipant.group_no} onChangeText={(v) => updateEditedField("group_no", v)} />
+                    <EditField label="Seat Number" value={editedParticipant.seat_no} onChangeText={(v) => updateEditedField("seat_no", v)} autoCapitalize="characters" />
                   </>
                 ) : (
                   <>
@@ -653,7 +657,8 @@ export default function App() {
                     <Detail label="Grade" value={participant?.grade} />
                     <Detail label="Phone" value={participant?.phone_no} />
                     <Detail label="Team No." value={participant?.team_no} />
-                    <Detail label="Group No." value={participant?.group_no} last />
+                    <Detail label="Group No." value={participant?.group_no} />
+                    <Detail label="Seat No." value={participant?.seat_no} last />
                   </>
                 )}
               </View>
@@ -755,6 +760,7 @@ export default function App() {
           )}
         </ScrollView>
       )}
+      {/* PARTICIPANT PHOTO MODAL */}
       <Modal
         visible={showPhotoPreview}
         transparent
@@ -880,6 +886,7 @@ export default function App() {
           </View>
         </View>
       </Modal>
+      {/* DISPERSAL CONFIRMATION MODAL */}
       <Modal
         visible={showDispersalConfirm}
         transparent={true}
@@ -1440,7 +1447,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: "center",
   },
-    photoContainer: {
+  photoContainer: {
     width: 112,
     height: 112,
     position: "relative",
@@ -1471,7 +1478,7 @@ const styles = StyleSheet.create({
     fontSize: 19,
     fontWeight: "900",
   },
-    photoModalOverlay: {
+  photoModalOverlay: {
     flex: 1,
     backgroundColor: "rgba(8,18,32,0.78)",
     justifyContent: "center",

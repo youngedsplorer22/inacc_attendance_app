@@ -69,7 +69,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # --------------------------------------------------
 # DOUBLETICK WHATSAPP NOTIFICATIONS
 # --------------------------------------------------
@@ -81,8 +80,6 @@ DOUBLETICK_PRESENT_TEMPLATE = os.getenv(
 DOUBLETICK_DISPERSAL_TEMPLATE = os.getenv("DOUBLETICK_DISPERSAL_TEMPLATE", "")
 DOUBLETICK_LANGUAGE = os.getenv("DOUBLETICK_LANGUAGE", "en")
 DOUBLETICK_API_URL = "https://public.doubletick.io/v2/whatsapp/message/template"
-
-
 def normalize_whatsapp_number(raw_number):
     """Return an international-format number, or None if it is unusable."""
     if not raw_number:
@@ -117,11 +114,9 @@ def send_doubletick_template(phone_number, template_name):
 
     if not DOUBLETICK_API_KEY:
         return {"status": "SKIPPED", "reason": "DOUBLETICK_API_KEY is not configured"}
-
     recipient = normalize_whatsapp_number(phone_number)
     if not recipient:
         return {"status": "SKIPPED", "reason": "Participant phone number is missing or invalid"}
-
     payload = {
         "messages": [
             {
@@ -186,6 +181,7 @@ class ParticipantUpdateRequest(BaseModel):
     grade: str | None = Field(default=None, max_length=50)
     team_no: str | None = Field(default=None, max_length=50)
     group_no: str | None = Field(default=None, max_length=50)
+    seat_no: str | None = Field(default=None, max_length=50)
 @app.get("/")
 def root():
     return {
@@ -297,6 +293,7 @@ def update_participant(
     allowed_columns = {
         "roll_no", "child_name", "phone_no", "email", "school_name",
         "city", "state", "region", "grade", "team_no", "group_no",
+        "seat_no",
     }
     updates = {
         column: value.strip() if isinstance(value, str) else value
@@ -342,7 +339,7 @@ def update_participant(
             WHERE id = %s
             RETURNING
                 id, roll_no, child_name, phone_no, email, school_name,
-                city, state, region, grade, team_no, group_no,
+                city, state, region, grade, team_no, group_no, seat_no,
                 image_url, cloudinary_public_id, in_premise
             """,
             values,
