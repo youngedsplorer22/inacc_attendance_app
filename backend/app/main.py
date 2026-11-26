@@ -421,7 +421,7 @@ def mark_present(
     request: AttendanceRequest,
 ):
     code = roll_no.strip()
-    event_day = get_current_event_day() or request.event_day
+    whatsapp_event_day = get_current_event_day() or request.event_day
     with get_connection() as conn:
         # Lock participant to prevent simultaneous updates.
         participant = conn.execute(
@@ -452,7 +452,7 @@ def mark_present(
               AND event_day = %s
             FOR UPDATE
             """,
-            (participant["id"], event_day),
+            (participant["id"], request.event_day),
         ).fetchone()
         if existing:
             # Already present and still inside.
@@ -494,7 +494,7 @@ def mark_present(
             """,
             (
                 participant["id"],
-                event_day,
+                request.event_day,
             ),
         ).fetchone()
         # Update current location status.
@@ -512,7 +512,7 @@ def mark_present(
         participant.get("phone_no"),
         DOUBLETICK_PRESENT_TEMPLATE,
         participant.get("child_name"),
-        event_day
+        whatsapp_event_day
     )
     return {
         "success": True,
@@ -531,7 +531,7 @@ def mark_dispersal(
     request: AttendanceRequest,
 ):
     code = roll_no.strip()
-    event_day = get_current_event_day() or request.event_day
+    whatsapp_event_day = get_current_event_day() or request.event_day
     with get_connection() as conn:
         # Lock participant during dispersal.
         participant = conn.execute(
@@ -627,7 +627,7 @@ def mark_dispersal(
         participant.get("phone_no"),
         DOUBLETICK_DISPERSAL_TEMPLATE,
         participant.get("child_name"),
-        event_day
+        whatsapp_event_day
     )
     return {
         "success": True,
