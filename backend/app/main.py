@@ -787,6 +787,63 @@ async def upload_participant_photo(
         )
     finally:
         await file.close()
+# --------------------------------------------------
+# STAFF APP ATTENDANCE ANALYTICS (READ-ONLY)
+# Reuses the date-based attendance calculations from the admin dashboard.
+# --------------------------------------------------
+@app.get("/api/v1/attendance/analytics")
+def staff_attendance_analytics(
+    selected_date: date | None = Query(default=None, alias="date")
+):
+    if selected_date is None:
+        selected_date = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    with get_connection() as conn:
+        summary = conn.execute(
+            """
+            WITH daily_attendance AS (
+                SELECT participant_id, MIN(in_time) AS in_time, MAX(out_time) AS out_time
+                FROM attendance_records
+                WHERE (in_time AT TIME ZONE 'Asia/Kolkata')::date = %s
+                GROUP BY participant_id
+            )
+            SELECT
+                COUNT(p.id) AS total_participants,
+                COUNT(d.participant_id) AS present_today,
+                COUNT(p.id) FILTER (WHERE p.in_premise = TRUE) AS currently_inside,
+                COUNT(p.id) FILTER (WHERE d.participant_id IS NULL) AS absent_today
+            FROM participants p
+            LEFT JOIN daily_attendance d ON d.participant_id = p.id
+            """,
+            (selected_date,)
+        ).fetchone()
+        participants = conn.execute(
+            """
+            WITH daily_attendance AS (
+                SELECT participant_id, MIN(in_time) AS in_time, MAX(out_time) AS out_time
+                FROM attendance_records
+                WHERE (in_time AT TIME ZONE 'Asia/Kolkata')::date = %s
+                GROUP BY participant_id
+            )
+            SELECT
+                p.roll_no, p.child_name, p.team_no, d.in_time, d.out_time,
+                CASE
+                    WHEN d.participant_id IS NULL THEN 'absent'
+                    WHEN d.out_time IS NULL THEN 'present'
+                    ELSE 'dispersed'
+                END AS attendance_status
+            FROM participants p
+            LEFT JOIN daily_attendance d ON d.participant_id = p.id
+            ORDER BY p.roll_no ASC
+            """,
+            (selected_date,)
+        ).fetchall()
+    return {
+        "success": True,
+        "date": selected_date.isoformat(),
+        "summary": summary,
+        "total": len(participants),
+        "participants": participants
+    }
 # ==================================================
 # ADMIN AUTHENTICATION AND DASHBOARD
 # ==================================================

@@ -14,6 +14,8 @@ import time
 import hmac
 import hashlib
 import base64
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -67,6 +69,160 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# --------------------------------------------------
+# DOUBLETICK WHATSAPP NOTIFICATIONS
+# --------------------------------------------------
+DOUBLETICK_API_KEY = os.getenv("DOUBLETICK_API_KEY")
+DOUBLETICK_FROM_NUMBER = os.getenv(
+    "DOUBLETICK_FROM_NUMBER",
+    "+917048950667"
+)
+DOUBLETICK_PRESENT_TEMPLATE = os.getenv(
+    "DOUBLETICK_PRESENT_TEMPLATE",
+    "inaac_attendance_present"
+)
+DOUBLETICK_DISPERSAL_TEMPLATE = os.getenv(
+    "DOUBLETICK_DISPERSAL_TEMPLATE",
+    "inaac_attendance_dispersal"
+)
+DOUBLETICK_LANGUAGE = os.getenv("DOUBLETICK_LANGUAGE", "en")
+DOUBLETICK_API_URL = (
+    "https://public.doubletick.io/v2/whatsapp/message/template"
+)
+INAAC_EVENT_START_DATE = date.fromisoformat(
+    os.getenv("INAAC_EVENT_START_DATE", "2026-12-01")
+)
+INAAC_TIMEZONE = ZoneInfo("Asia/Kolkata")
+def get_current_event_day():
+    """
+    Automatically calculate INAAC event day using Indian Standard Time.
+    Returns 1-4 during the event, otherwise None.
+    """
+    today = datetime.now(INAAC_TIMEZONE).date()
+    day_number = (today - INAAC_EVENT_START_DATE).days + 1
+    if 1 <= day_number <= 4:
+        return day_number
+    return None
+def normalize_whatsapp_number(raw_number):
+    """Return an international-format number, or None if it is unusable."""
+    if not raw_number:
+        return None
+    raw = str(raw_number).strip()
+    if raw.startswith("+"):
+        digits = "".join(ch for ch in raw[1:] if ch.isdigit())
+        return f"+{digits}" if 10 <= len(digits) <= 15 else None
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10:
+        # Local 10-digit numbers in this INAAC database are Indian numbers.
+        return f"+91{digits}"
+    if digits.startswith("91") and len(digits) == 12:
+        return f"+{digits}"
+    if digits.startswith("971") and len(digits) == 12:
+        return f"+{digits}"
+    if 10 <= len(digits) <= 15:
+        return f"+{digits}"
+    return None
+def send_doubletick_template(
+    phone_number,
+    template_name,
+    child_name,
+    event_day
+):
+    """
+    Send a personalised DoubleTick V2 WhatsApp template.
+    """
+    if not template_name:
+        return {
+            "status": "SKIPPED",
+            "reason": "No template configured"
+        }
+    if not DOUBLETICK_API_KEY:
+        return {
+            "status": "SKIPPED",
+            "reason": "DOUBLETICK_API_KEY is not configured"
+        }
+    recipient = normalize_whatsapp_number(phone_number)
+    if not recipient:
+        return {
+            "status": "SKIPPED",
+            "reason": "Participant phone number is missing or invalid"
+        }
+    if not child_name:
+        return {
+            "status": "SKIPPED",
+            "reason": "Participant name is missing"
+        }
+    payload = {
+        "messages": [
+            {
+                "from": DOUBLETICK_FROM_NUMBER,
+                "to": recipient,
+                "content": {
+                    "templateName": template_name,
+                    "language": DOUBLETICK_LANGUAGE,
+                    "templateData": {
+                        "body": {
+                            "placeholders": [
+                                {"child_name": str(child_name)},
+                                {"event_day": f"Day {event_day}"}
+                            ]
+                        }
+                    }
+                }
+            }
+        ]
+    }
+    request = urllib.request.Request(
+        DOUBLETICK_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": DOUBLETICK_API_KEY,
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        },
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw_response = response.read().decode(
+                "utf-8",
+                errors="replace"
+            )
+            parsed = json.loads(raw_response) if raw_response else {}
+            result = (
+                parsed[0]
+                if isinstance(parsed, list) and parsed
+                else parsed
+            )
+            if isinstance(result, dict):
+                return {
+                    "status": result.get("status", "ACCEPTED"),
+                    "message_id": result.get("messageId"),
+                    "error": result.get("errorMessage")
+                }
+            return {"status": "ACCEPTED"}
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode(
+            "utf-8",
+            errors="replace"
+        )
+        print(
+            f"DoubleTick HTTP error {exc.code}: "
+            f"{error_body[:500]}"
+        )
+        return {
+            "status": "FAILED",
+            "reason": f"DoubleTick HTTP {exc.code}"
+        }
+    except Exception as exc:
+        print(
+            f"DoubleTick request failed: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return {
+            "status": "FAILED",
+            "reason": "DoubleTick request failed"
+        }
 def get_connection():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is missing. Check backend/.env")
@@ -88,6 +244,7 @@ class ParticipantUpdateRequest(BaseModel):
     grade: str | None = Field(default=None, max_length=50)
     team_no: str | None = Field(default=None, max_length=50)
     group_no: str | None = Field(default=None, max_length=50)
+    seat_no: str | None = Field(default=None, max_length=50)
 @app.get("/")
 def root():
     return {
@@ -138,6 +295,7 @@ def get_participant(
                 p.phone_no,
                 p.team_no,
                 p.group_no,
+                p.seat_no,
                 p.image_url,
                 p.cloudinary_public_id,
                 p.in_premise,
@@ -198,6 +356,7 @@ def update_participant(
     allowed_columns = {
         "roll_no", "child_name", "phone_no", "email", "school_name",
         "city", "state", "region", "grade", "team_no", "group_no",
+        "seat_no",
     }
     updates = {
         column: value.strip() if isinstance(value, str) else value
@@ -243,7 +402,7 @@ def update_participant(
             WHERE id = %s
             RETURNING
                 id, roll_no, child_name, phone_no, email, school_name,
-                city, state, region, grade, team_no, group_no,
+                city, state, region, grade, team_no, group_no, seat_no,
                 image_url, cloudinary_public_id, in_premise
             """,
             values,
@@ -262,11 +421,12 @@ def mark_present(
     request: AttendanceRequest,
 ):
     code = roll_no.strip()
+    whatsapp_event_day = get_current_event_day() or request.event_day
     with get_connection() as conn:
         # Lock participant to prevent simultaneous updates.
         participant = conn.execute(
             """
-            SELECT id, roll_no, in_premise
+            SELECT id, roll_no, in_premise, phone_no, child_name
             FROM participants
             WHERE roll_no = %s
             FOR UPDATE
@@ -347,12 +507,20 @@ def mark_present(
             """,
             (participant["id"],),
         )
+    # Send only for a newly created attendance record, after the DB commit.
+    whatsapp = send_doubletick_template(
+        participant.get("phone_no"),
+        DOUBLETICK_PRESENT_TEMPLATE,
+        participant.get("child_name"),
+        whatsapp_event_day
+    )
     return {
         "success": True,
         "message": "Attendance marked successfully.",
         "already_marked": False,
         "in_premise": True,
         "attendance": attendance,
+        "whatsapp": whatsapp,
     }
 # --------------------------------------------------
 # MARK DISPERSAL
@@ -363,11 +531,12 @@ def mark_dispersal(
     request: AttendanceRequest,
 ):
     code = roll_no.strip()
+    whatsapp_event_day = get_current_event_day() or request.event_day
     with get_connection() as conn:
         # Lock participant during dispersal.
         participant = conn.execute(
             """
-            SELECT id, roll_no, in_premise
+            SELECT id, roll_no, in_premise, phone_no, child_name
             FROM participants
             WHERE roll_no = %s
             FOR UPDATE
@@ -453,12 +622,20 @@ def mark_dispersal(
             """,
             (participant["id"],),
         )
+    # Send only for a newly recorded dispersal, after the DB commit.
+    whatsapp = send_doubletick_template(
+        participant.get("phone_no"),
+        DOUBLETICK_DISPERSAL_TEMPLATE,
+        participant.get("child_name"),
+        whatsapp_event_day
+    )
     return {
         "success": True,
         "message": "Dispersal marked successfully.",
         "already_dispersed": False,
         "in_premise": False,
         "attendance": attendance,
+        "whatsapp": whatsapp,
     }
 # --------------------------------------------------
 # PARTICIPANT ATTENDANCE HISTORY
